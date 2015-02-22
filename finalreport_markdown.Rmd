@@ -1,0 +1,168 @@
+---
+title: "Machine Learning Project"
+author: "Doug Gorman"
+date: "Thursday, February 19, 2015"
+output: html_document
+---
+
+### Synopsis 
+This project focuses on using a machine learning algorithm to predict the manner in which a person completes a bumbbell bicep curl. Six subjects were given instruction for completing the dumbbell curl according to specifications matching one of the following classifications:  
+- A: Good Form  
+- B: Throwing elbows to the front  
+- C: Lifting the dumbbell only half way  
+- D: Lowering the dumbell only half way  
+- E: Throwing hips to the front    
+
+Applications in this area would include computer feedback for the user letting them know how they may be improperly executing the exercise so the behavior could be corrected.  The data set and a paper from the experimentors is available here 
+[Source Paper](http://groupware.les.inf.puc-rio.br/har)  
+
+### Summary of results
+The final model chosen for the prediction of the "classe" variable was a Random Forest.  The model was built with a randomly selected training set consisting of 75% of the observations, with the additional 25% being set aside for cross-validation.  
+The **out of sample error** from the random forest is estimated to be between 99.27% and 99.69% with 95% confidence.   For full details of the performance of the model see the section titled *"Method 2 - Random Forest"* below.
+
+### Getting the data and loading required packages
+For reproducibility the data is obtained directly from the course website.
+
+```{r}
+#downloading the files from the coursera page for reproducibility
+
+fileUrl.train<-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+#dbtrain<-read.csv(text=fileUrl.train, na.strings=c("","NA"))
+download.file(fileUrl.train, destfile="pml-training.csv")
+
+fileUrl.test<-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+#dbtest<-read.csv(text=fileUrl.test, na.strings=c("","NA"))
+download.file(fileUrl.test, destfile="pml-testing.csv")
+
+dbtrain<-read.csv("pml-training.csv", na.strings=c("","NA"))
+dbtest<-read.csv("pml-testing.csv", na.strings=c("","NA"))
+
+# the following packages are required for running the code
+library(caret)
+library(ggplot2)
+library(rpart)
+library(randomForest)
+```
+
+### Data preparation and Cleaning  
+There were many columns in the raw csv file that were not used for the analysis.  Inital inspection of the variables in the data set led me to remove several columns.  Some were obviously not relevant for prediction for example (Record Number, raw\_time, new\_window,...).  Additionally, many of the columns included in the dataset appeart to be summary statistics for each exercise repitition (skewnesses, averages, standard deviations for example).  Most of these quantities were absent in the data set provided and were therefore not used in the prediction exercise.  These sparse columns were found and excluded using R by calculating columns with greater than 95% missing values.  The following is a summary of the rationale and approach for removing these columns from the data:  
+
+1. drop all columns that should not be used for prediction  
+2. drop all of the columns that are summary statistics or have a high percentage of missing
+- X (row number), raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window
+These are all data about when the experiment was run or the time during the exercise, while i think the experimenters actually used summary statistics to predict (calculating summary stats across the windows)our test set does not treat the data this way and they are of no use to us. 
+
+```{r, cache=TRUE}
+        # calculate the percent missing
+          permiss<-sapply(dbtrain, function(x) sum(is.na(x))/length(x))
+
+        #identify columns with >.95 of values missing
+          highmiss<-permiss>.95
+
+        #drop these columns from the datasets
+          dbtrain<-dbtrain[,highmiss==FALSE]
+          dbtest<-dbtest[,highmiss==FALSE]
+
+        #drop illogical predictors (demographic type variables)
+          not_used<-c("X", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window")
+          dbtrain<-dbtrain[,!( names(dbtrain) %in% not_used)]
+          dbtest<-dbtest[,!( names(dbtest) %in% not_used)]
+
+#  Plotting all x-variables by user_name and colored by classe (commented out so they dont overwhelm the report)
+#
+#   xvar<-names(training)  # for graph titles
+#
+#      for(i in 2:53) {print(qplot(user_name, training[,i], data=training, color=classe, geom="jitter", main=xvar[i]))}
+#                       
+#
+
+```
+
+### Exploring the predictor data
+
+A series of plots were generated to explore the data.  Each predictor value was plotted against the subject (user_name) and each data point colored by the exercise classification (classe).  An example plot is shown here.  The figure shows that the "roll belt" metric may be a useful predictor (in fact it turns out to be one of the most influential predictors) see figure 3. 
+
+**Figure 1** - Exploring the predictors, roll belt relation to class.  
+```{r}
+  print(qplot(user_name, roll_belt, data=dbtrain, color=classe, geom="jitter", main="Belt Roll vs. User, Colored by Classe"))
+```
+
+While there were many unusual observations in the data.  For example, there seemed to be issues with the subjects Jerome and Adelmo sensors reading zero for all repititions, and some values with extreme magnitudes.  
+
+**Figure 2** - Unusual observations (all zeros) for Adelmo  
+```{r}
+  print(qplot(user_name, yaw_forearm, data=dbtrain, color=classe, geom="jitter", main="Forearm Yaw vs. User, Colored by Classe"))
+```
+  
+  
+All of these values were kept in the dataset, since my knowledge of what these observations mean is greatly limited by not having access to a good description of the data and what issues the experimenters may have run into.  The Random Forest model that was built did not appear to be sensitive to these values since the resulting predictions on both the test set and the validation set were quite good.
+
+### The Machine Learning Process  
+
+The data set was partitioned using the caret partitioning funtion to produce a data set that consisted of 75% of the data for training and 25% for cross validation.  SOme quick diagnostics looking for near zero variance predictors were run. The results did not show any low variance predictors.
+
+```{r, cache=TRUE}
+  set.seed(845)
+
+    ltrain<-createDataPartition(y=dbtrain$classe, p=.75, list=FALSE)
+        training<-dbtrain[ltrain,]
+        test<-dbtrain[-ltrain,]
+
+# Quick predictor diagnostics - looking for ones with near zero variation 
+
+    nzv<-nearZeroVar(training, saveMetrics=TRUE)
+    sum(nzv$nzv)
+    
+```
+
+  
+#### Method 1 - Recursive partitioning  
+First a recursive partitioning tree was fit with no bagging or boosting.  For this model the in-sample and out of sample accuracies were poor (in sample = .49 , out of sample = 0.50).  
+
+```{r, cache=TRUE}
+#           model fit for recursive partitioning 
+
+modelFit.rp<-train(classe ~., data=training, method="rpart")
+
+#cross validation on test set
+predictions.rp<-predict(modelFit.rp, newdata=test)
+confusionMatrix(predictions.rp, test$classe)
+```
+
+#### Method 2 - Random Forest  
+Next a Random Forest approach to fitting the model was employed.  Difficulties with using the train function forced me to move to the package randomForest.  This method had very high out of sample accuracy >99.3% at the 97.5 confidence level. 
+
+```{r, cache=TRUE}
+#               Model Fitting Random Forest Model
+
+modelFit<-randomForest(classe~., data=training)
+
+#cross validation on test set
+predictions<-predict(modelFit, newdata=test)
+confusionMatrix(predictions, test$classe)
+```
+  
+  
+The following plot shows the variables that had the most impact on reducing the Gini index (measure of impurity).  The plot shows the largest impact s were made by the top 8 variables in the chart. 
+- roll\_belt through roll\_dumbell.  
+
+**Figure 3** - Mean decrease in Gini index by predictor variable.
+```{r}
+varImpPlot(modelFit)
+```
+
+  
+  
+*Final Predictions*  
+
+Finally the predeictions against the 20 test cases were made.  The results (as judged by the submital), all test cases were predicted correctly.  
+
+```{r}
+#predictions for final test set
+predictions.final<-predict(modelFit, newdata=dbtest)
+data.frame(sample=1:20, prediction=predictions.final)
+```
+
+
+
+
